@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+.env
+bot.log
+bot_new.log
+torrents.json
+rss_items.json
+scratch/
+*.DS_Store

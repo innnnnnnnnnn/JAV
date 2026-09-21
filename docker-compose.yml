@@ -1,0 +1,9 @@
+services:
+  jav-bot:
+    build: .
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./torrents.json:/app/torrents.json
+      - ./bot.log:/app/bot.log
