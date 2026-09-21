@@ -6,4 +6,6 @@ services:
       - .env
     volumes:
       - ./torrents.json:/app/torrents.json
+      - ./rss_items.json:/app/rss_items.json
+      - ./rss.xml:/app/rss.xml
       - ./bot.log:/app/bot.log
