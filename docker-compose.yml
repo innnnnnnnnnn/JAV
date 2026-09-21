@@ -4,6 +4,8 @@ services:
     restart: always
     env_file:
       - .env
+    ports:
+      - "8765:8765"
     volumes:
       - ./torrents.json:/app/torrents.json
       - ./rss_items.json:/app/rss_items.json
