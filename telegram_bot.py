@@ -205,24 +205,36 @@ class JAVBot:
 
     async def _refresh_all_rss_items(self):
         crawler = OneJAVCrawler()
+        loop = asyncio.get_event_loop()
+        semaphore = asyncio.Semaphore(5)  # 同時最多 5 個並行請求
+        results = {}  # code -> new_url or None
+
+        async def fetch_one(code):
+            async with semaphore:
+                video = await loop.run_in_executor(None, crawler.get_video_by_code, code)
+                return code, video
+
+        logger.info(f"Starting concurrent refresh of {len(self.rss_items)} RSS items...")
+        tasks = [fetch_one(item['code']) for item in self.rss_items]
+        fetched = await asyncio.gather(*tasks)
+
         count = 0
-        logger.info(f"Starting refresh of {len(self.rss_items)} RSS items...")
-        for item in self.rss_items:
-            code = item['code']
-            video = crawler.get_video_by_code(code)
+        for code, video in fetched:
             if video and video.get('torrent_url'):
                 new_url = video['torrent_url']
-                if item.get('link') != new_url:
-                    logger.info(f"Updated link for {code}: {new_url}")
-                    item['link'] = new_url
-                    self.torrent_map[code] = new_url
-                    count += 1
-                else:
-                    logger.info(f"Link for {code} is already up to date.")
+                for item in self.rss_items:
+                    if item['code'] == code:
+                        if item.get('link') != new_url:
+                            logger.info(f"Updated link for {code}: {new_url}")
+                            item['link'] = new_url
+                            self.torrent_map[code] = new_url
+                            count += 1
+                        else:
+                            logger.info(f"Link for {code} is already up to date.")
+                        break
             else:
                 logger.warning(f"Could not find latest link for {code}")
-            await asyncio.sleep(1) # Anti-abuse delay
-            
+
         if count > 0:
             self._save_torrents()
             self._save_rss()
