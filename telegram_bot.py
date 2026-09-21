@@ -237,7 +237,7 @@ class JAVBot:
             self._save_torrents()
             updated = False
             for item in self.rss_items:
-                if item['code'] == code:
+                if item['code'].upper().replace('-', '') == code.upper().replace('-', ''):
                     item['link'] = new_url
                     updated = True
             if updated:
