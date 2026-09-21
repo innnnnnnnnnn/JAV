@@ -14,14 +14,19 @@ class OneJAVCrawler:
     def get_video_by_code(self, code):
         """
         Search for a specific code and return the video info (primarily the new torrent URL).
+        Searches up to 7 pages, tolerating up to 2 consecutive empty pages (onejav has pagination gaps).
         """
-        for page in range(1, 6):
-            url = f"{self.BASE_URL}/search/{code}?page={page}" if page > 1 else f"{self.BASE_URL}/search/{code}"
+        code_norm = code.upper().replace('-', '')
+        empty_streak = 0
+
+        for page in range(1, 8):
+            url = f"{self.BASE_URL}/search/{code}" if page == 1 else f"{self.BASE_URL}/search/{code}?page={page}"
             print(f"Searching for code: {code} at {url}")
-            
+
             try:
                 response = self.session.get(url, timeout=15)
                 if response.status_code != 200:
+                    print(f"Search failed for {code} page {page}: {response.status_code}")
                     break
             except Exception as e:
                 print(f"Error searching for {code}: {e}")
@@ -29,34 +34,31 @@ class OneJAVCrawler:
 
             soup = BeautifulSoup(response.text, 'html.parser')
             cards = soup.select('.card')
-            
+
             if not cards:
-                break
-                
+                empty_streak += 1
+                if empty_streak >= 2:
+                    break
+                continue  # onejav sometimes skips a page number — keep going
+            empty_streak = 0
+
             for card in cards:
-                # Check if this card matches the code
                 title_tag = card.select_one('.title a')
                 if title_tag:
                     found_code = title_tag.get_text(strip=True).upper()
-                    # Remove hyphens for comparison if needed, or just exact match
-                    if code.upper().replace('-', '') == found_code.replace('-', ''):
+                    if code_norm == found_code.replace('-', ''):
                         video = {'code': found_code}
-                        
-                        # Torrent Link
                         torrent_tag = card.select_one('a.button.is-primary.is-fullwidth')
                         if torrent_tag:
                             href = torrent_tag.get('href')
                             if href:
                                 video['torrent_url'] = self.BASE_URL + href
-                        
-                        # Title
                         level_tag = card.select_one('.level.has-text-grey-dark')
                         if level_tag:
                             video['title'] = level_tag.get_text(strip=True)
-                            
                         return video
 
-        print(f"No exact match found for {code} in search results (checked 5 pages).")
+        print(f"No exact match found for {code} in search results.")
         return None
 
     def get_daily_videos(self, date_str=None):
