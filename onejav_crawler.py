@@ -115,12 +115,18 @@ class OneJAVCrawler:
 
         for base_url in self.SOURCES:
             videos = []
+            seen_codes = set()
             page = 1
             source_failed = False
+            max_pages = 25  # Safety cap: no day has more than 25 pages
             print(f"Fetching daily videos from {base_url} for {date_str}...")
 
-            while True:
-                url = f"{base_url}/{date_str}?page={page}"
+            while page <= max_pages:
+                if "ffjav.com" in base_url:
+                    url = f"{base_url}/{date_str}" if page == 1 else f"{base_url}/{date_str}/page/{page}"
+                else:
+                    url = f"{base_url}/{date_str}?page={page}"
+
                 print(f"Fetching: {url}")
 
                 try:
@@ -143,7 +149,7 @@ class OneJAVCrawler:
                     print(f"[{base_url}] No cards found on page {page}. Stopping.")
                     break
 
-                found_on_page = 0
+                found_new_on_page = 0
                 for card in cards:
                     torrent_tag = card.select_one('a.button.is-primary.is-fullwidth')
                     if not torrent_tag:
@@ -161,6 +167,10 @@ class OneJAVCrawler:
                     m = re.search(r'(?:onejav|ffjav)\.com_([a-zA-Z0-9_-]+)\.torrent', href, re.I)
                     if m:
                         code = m.group(1).upper()
+
+                    norm_code = code.upper().replace('-', '') if code else ''
+                    if not norm_code or norm_code in seen_codes:
+                        continue
 
                     level_tag = card.select_one('.level.has-text-grey-dark')
                     clean_title = level_tag.get_text(strip=True) if (level_tag and level_tag.get_text(strip=True)) else title_text
@@ -184,15 +194,20 @@ class OneJAVCrawler:
                         'torrent_url': torrent_url
                     }
 
-                    if code:
-                        videos.append(video)
-                        found_on_page += 1
+                    seen_codes.add(norm_code)
+                    videos.append(video)
+                    found_new_on_page += 1
 
-                print(f"[{base_url}] Found {found_on_page} videos on page {page}.")
+                print(f"[{base_url}] Found {found_new_on_page} new videos on page {page}.")
+                if found_new_on_page == 0:
+                    print(f"[{base_url}] No new unique videos found on page {page}. Stopping.")
+                    break
+
                 page += 1
                 time.sleep(0.5)
 
             if not source_failed and videos:
+                print(f"[{base_url}] Successfully retrieved {len(videos)} unique videos for {date_str}.")
                 return videos
             else:
                 print(f"[{base_url}] Failed to get daily videos, trying next source...")

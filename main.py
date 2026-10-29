@@ -36,13 +36,21 @@ async def run_daily_push(context=None):
         print("Error: Bot instance not found in job data.")
         return
 
+    pushed_count = 0
+    skipped_count = 0
     for video in videos:
+        code = video.get('code')
+        if code and bot.is_pushed(code):
+            skipped_count += 1
+            continue
+
         v_translated = translator.translate_video(video)
         await bot.send_video_info(v_translated)
+        pushed_count += 1
         # Sleep a bit to avoid rate limiting
         await asyncio.sleep(1)
     
-    print(f"--- [Scheduled] Push completed for {date_str} ---")
+    print(f"--- [Scheduled] Push completed for {date_str}: {pushed_count} new sent, {skipped_count} skipped (already pushed). ---")
 
 async def main():
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -88,7 +96,7 @@ async def main():
 
     print("Bot starting and staying alive for callbacks and scheduled jobs...")
     await bot.application.start()
-    await bot.application.updater.start_polling()
+    await bot.application.updater.start_polling(drop_pending_updates=True)
     
     try:
         while True:

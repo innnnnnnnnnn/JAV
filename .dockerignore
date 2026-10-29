@@ -3,6 +3,7 @@ __pycache__
 *.log
 torrents.json
 rss_items.json
+pushed_codes.json
 rss.xml
 .git
 .DS_Store

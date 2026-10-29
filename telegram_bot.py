@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 TORRENT_DB = "torrents.json"
 RSS_DB = "rss_items.json"
+PUSHED_DB = "pushed_codes.json"
 
 class JAVBot:
     def __init__(self):
@@ -27,6 +28,7 @@ class JAVBot:
         self.qnap = QnapDownloadStation(QNAP_HOST, QNAP_USERNAME, QNAP_PASSWORD, QNAP_DOWNLOAD_PATH)
         self.torrent_map = self._load_torrents()
         self.rss_items = self._load_rss()
+        self.pushed_codes = self._load_pushed_codes()
         self._update_static_rss_file()
         
         # Handlers
@@ -35,6 +37,43 @@ class JAVBot:
         self.application.add_handler(CommandHandler("push", self.manual_push))
         self.application.add_handler(CallbackQueryHandler(self.button_callback))
         self.application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self.handle_message))
+
+    def _load_pushed_codes(self):
+        if os.path.exists(PUSHED_DB):
+            try:
+                with open(PUSHED_DB, 'r') as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        return set(data)
+                    elif isinstance(data, dict):
+                        return set(data.keys())
+            except Exception as e:
+                logger.error(f"Failed to load pushed codes DB: {e}")
+        return set()
+
+    def _save_pushed_codes(self):
+        try:
+            # Keep at most last 5000 codes to avoid endless file growth
+            codes_list = list(self.pushed_codes)
+            if len(codes_list) > 5000:
+                codes_list = codes_list[-5000:]
+                self.pushed_codes = set(codes_list)
+            with open(PUSHED_DB, 'w') as f:
+                json.dump(codes_list, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save pushed codes DB: {e}")
+
+    def mark_as_pushed(self, code):
+        if not code:
+            return
+        norm = code.upper().replace('-', '')
+        self.pushed_codes.add(norm)
+        self._save_pushed_codes()
+
+    def is_pushed(self, code):
+        if not code:
+            return False
+        return code.upper().replace('-', '') in self.pushed_codes
 
     def _load_torrents(self):
         if os.path.exists(TORRENT_DB):
@@ -470,6 +509,8 @@ class JAVBot:
                 await self.application.bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=image, caption=caption, parse_mode='HTML', reply_markup=reply_markup)
             else:
                 await self.application.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=caption, parse_mode='HTML', reply_markup=reply_markup)
+            if code:
+                self.mark_as_pushed(code)
         except Exception as e:
             logger.error(f"Failed to send message: {e}")
             logger.error(f"Problematic caption: {caption}")
