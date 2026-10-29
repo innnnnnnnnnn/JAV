@@ -176,22 +176,43 @@ class JAVBot:
 
     async def web_fix_handler(self, request):
         # If code and url are provided, use them. 
+        # If only code is provided, re-crawl for that code.
         # Otherwise, refresh all items in RSS.
         code = request.query.get('code')
         url = request.query.get('url')
         
         if code and url:
             # Manual fix
+            code_norm = code.upper().replace('-', '')
             self.torrent_map[code] = url
+            self.torrent_map[code_norm] = url
             self._save_torrents()
             updated = False
             for item in self.rss_items:
-                if item['code'] == code:
+                if item['code'].upper().replace('-', '') == code_norm:
                     item['link'] = url
                     updated = True
             if updated:
                 self._save_rss()
             return web.Response(text=f"✅ 已手動更新 {code} 的網址。")
+        elif code and not url:
+            # Auto fetch for single code
+            crawler = OneJAVCrawler()
+            loop = asyncio.get_event_loop()
+            video = await loop.run_in_executor(None, crawler.get_video_by_code, code)
+            if video and video.get('torrent_url'):
+                new_url = video['torrent_url']
+                code_norm = code.upper().replace('-', '')
+                self.torrent_map[code] = new_url
+                self.torrent_map[code_norm] = new_url
+                self._save_torrents()
+                for item in self.rss_items:
+                    if item['code'].upper().replace('-', '') == code_norm:
+                        item['link'] = new_url
+                self._save_rss()
+                return web.Response(text=f"✅ 已自動重新抓取並更新 {code} 的網址：{new_url}")
+            else:
+                return web.Response(text=f"❌ 找不到 {code} 的最新連結。")
         else:
             # Full refresh
             logger.info("Web request to refresh all RSS items triggered.")
@@ -207,7 +228,6 @@ class JAVBot:
         crawler = OneJAVCrawler()
         loop = asyncio.get_event_loop()
         semaphore = asyncio.Semaphore(5)  # 同時最多 5 個並行請求
-        results = {}  # code -> new_url or None
 
         async def fetch_one(code):
             async with semaphore:
@@ -222,12 +242,14 @@ class JAVBot:
         for code, video in fetched:
             if video and video.get('torrent_url'):
                 new_url = video['torrent_url']
+                code_norm = code.upper().replace('-', '')
                 for item in self.rss_items:
-                    if item['code'] == code:
+                    if item['code'].upper().replace('-', '') == code_norm:
                         if item.get('link') != new_url:
                             logger.info(f"Updated link for {code}: {new_url}")
                             item['link'] = new_url
                             self.torrent_map[code] = new_url
+                            self.torrent_map[code_norm] = new_url
                             count += 1
                         else:
                             logger.info(f"Link for {code} is already up to date.")
@@ -241,14 +263,15 @@ class JAVBot:
         return count
 
     async def fix_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        # 1. Manual fix: /fix <code> <url>
         if context.args and len(context.args) >= 2:
-            # Manual fix via Telegram
-            code = context.args[0]
-            new_url = context.args[1]
+            code = context.args[0].strip()
+            new_url = context.args[1].strip()
+            code_norm = code.upper().replace('-', '')
             self.torrent_map[code] = new_url
+            self.torrent_map[code_norm] = new_url
             self._save_torrents()
             updated = False
-            code_norm = code.upper().replace('-', '')
             for item in self.rss_items:
                 if item['code'].upper().replace('-', '') == code_norm:
                     item['link'] = new_url
@@ -256,11 +279,83 @@ class JAVBot:
             if updated:
                 self._save_rss()
             await update.message.reply_text(f"✅ 已手動更新 {code} 的網址。")
-        else:
-            # Full refresh via Telegram
-            msg = await update.message.reply_text("🔍 正在重新抓取 RSS 清單中所有影片的最新連結...")
-            count = await self._refresh_all_rss_items()
-            await msg.edit_text(f"✅ 已完成重新抓取，共更新 {count} 個項目的連結。")
+            return
+
+        # Check if a target code is specified via arguments or reply-to message
+        target_code = None
+        if context.args and len(context.args) == 1:
+            target_code = context.args[0].strip()
+        elif update.message and update.message.reply_to_message:
+            rep = update.message.reply_to_message
+            # Try to get code from inline keyboard buttons
+            if rep.reply_markup and rep.reply_markup.inline_keyboard:
+                for row in rep.reply_markup.inline_keyboard:
+                    for btn in row:
+                        if btn.callback_data:
+                            if btn.callback_data.startswith("add_"):
+                                target_code = btn.callback_data.replace("add_", "").strip()
+                                break
+                            elif btn.callback_data.startswith("rss_"):
+                                target_code = btn.callback_data.replace("rss_", "").strip()
+                                break
+                    if target_code:
+                        break
+            # Try to get code from message caption or text
+            if not target_code:
+                rep_text = rep.caption or rep.text or ""
+                m = re.search(r"序號:\s*<code>(.*?)</code>", rep_text) or re.search(r"序號:\s*([A-Za-z0-9_-]+)", rep_text)
+                if m:
+                    target_code = m.group(1).strip()
+
+        # 2. Single video fix: /fix <code> or reply to a video message with /fix
+        if target_code:
+            msg = await update.message.reply_text(f"🔍 正在重新抓取 {target_code} 的最新連結...")
+            crawler = OneJAVCrawler()
+            loop = asyncio.get_event_loop()
+            video = await loop.run_in_executor(None, crawler.get_video_by_code, target_code)
+            if video and video.get('torrent_url'):
+                new_url = video['torrent_url']
+                found_code = video.get('code', target_code)
+                code_norm = found_code.upper().replace('-', '')
+
+                self.torrent_map[found_code] = new_url
+                self.torrent_map[target_code] = new_url
+                self.torrent_map[code_norm] = new_url
+                self._save_torrents()
+
+                updated_rss = False
+                for item in self.rss_items:
+                    if item['code'].upper().replace('-', '') == code_norm:
+                        item['link'] = new_url
+                        updated_rss = True
+                if updated_rss:
+                    self._save_rss()
+
+                rss_note = "\n📡 RSS 清單中的連結已同步更新！" if updated_rss else ""
+                await msg.edit_text(
+                    f"✅ 已成功更新 {found_code} 的影片連結！{rss_note}\n\n"
+                    f"🔗 最新載點：\n{new_url}\n\n"
+                    f"💡 現在點擊該部影片的「✨ 新增到 QNAP」或「📡 新增到 RSS」即可正常下載。"
+                )
+            else:
+                await msg.edit_text(f"❌ 找不到 {target_code} 的最新連結，請確認番號是否正確。")
+            return
+
+        # 3. Full refresh of RSS list: /fix (no args, no reply)
+        if not self.rss_items:
+            await update.message.reply_text(
+                "ℹ️ 目前 RSS 清單為空。\n\n"
+                "📌 若要更新特定影片，您可以使用：\n"
+                "• <code>/fix &lt;番號&gt;</code>（例如：<code>/fix SKMJ-801</code>）\n"
+                "• 直接回覆該部影片的訊息並輸入 <code>/fix</code>\n"
+                "• <code>/fix &lt;番號&gt; &lt;載點網址&gt;</code>（手動更新）",
+                parse_mode='HTML'
+            )
+            return
+
+        msg = await update.message.reply_text(f"🔍 正在重新抓取 RSS 清單中 {len(self.rss_items)} 個項目的最新連結...")
+        count = await self._refresh_all_rss_items()
+        await msg.edit_text(f"✅ 已完成重新抓取，共更新 {count} 個項目的連結。")
 
     async def clear_rss(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         self.rss_items = []
@@ -383,34 +478,62 @@ class JAVBot:
         query = update.callback_query
         data = query.data
         if data.startswith("add_"):
-            code = data.replace("add_", "")
+            code = data.replace("add_", "").strip()
             torrent_url = self.torrent_map.get(code)
+            if not torrent_url:
+                code_norm = code.upper().replace('-', '')
+                for k, v in self.torrent_map.items():
+                    if k.upper().replace('-', '') == code_norm:
+                        torrent_url = v
+                        break
+            if not torrent_url:
+                # Try auto-fetch on the fly
+                crawler = OneJAVCrawler()
+                video = await asyncio.get_event_loop().run_in_executor(None, crawler.get_video_by_code, code)
+                if video and video.get('torrent_url'):
+                    torrent_url = video['torrent_url']
+                    self.torrent_map[code] = torrent_url
+                    self.torrent_map[code.upper().replace('-', '')] = torrent_url
+                    self._save_torrents()
+
             await query.answer(text=f"正在嘗試新增 {code} 到 QNAP...")
             if torrent_url:
                 if self.qnap.add_task(torrent_url):
                     await query.answer(text=f"✅ {code} 已成功新增到 QNAP!", show_alert=False)
                 else:
-                    await query.answer(text=f"❌ QNAP 回應失敗。請檢查日誌或 NAS 狀態。", show_alert=False)
+                    await query.answer(text=f"❌ QNAP 回應失敗。請檢查日誌或輸入 /fix {code} 重新抓取最新載點。", show_alert=False)
             else:
-                await query.answer(text=f"❌ 找不到連結。舊日期請重新查詢一次以更新連結。", show_alert=False)
+                await query.answer(text=f"❌ 找不到連結。請輸入 /fix {code} 重新抓取。", show_alert=False)
         elif data.startswith("rss_"):
-            code = data.replace("rss_", "")
+            code = data.replace("rss_", "").strip()
             torrent_url = self.torrent_map.get(code)
             if not torrent_url:
-                await query.answer(text=f"❌ 找不到連結。請重新查詢。", show_alert=False)
+                code_norm = code.upper().replace('-', '')
+                for k, v in self.torrent_map.items():
+                    if k.upper().replace('-', '') == code_norm:
+                        torrent_url = v
+                        break
+            if not torrent_url:
+                crawler = OneJAVCrawler()
+                video = await asyncio.get_event_loop().run_in_executor(None, crawler.get_video_by_code, code)
+                if video and video.get('torrent_url'):
+                    torrent_url = video['torrent_url']
+                    self.torrent_map[code] = torrent_url
+                    self.torrent_map[code.upper().replace('-', '')] = torrent_url
+                    self._save_torrents()
+
+            if not torrent_url:
+                await query.answer(text=f"❌ 找不到連結。請輸入 /fix {code} 重新抓取。", show_alert=False)
                 return
             
-            # Find title from message or cache? 
-            # For simplicity, we use the code as title if we don't have it, 
-            # but usually it's in the message. 
-            # We can extract it or just use the code. 
-            # Let's try to get it from the message if possible.
+            # Find title from message or cache
             msg_text = query.message.caption or query.message.text or ""
             title_match = re.search(r"🎬 (.*)\n", msg_text)
             title = title_match.group(1) if title_match else code
             
-            # Check if already in RSS
-            if any(item['code'] == code for item in self.rss_items):
+            # Check if already in RSS (case-insensitive & hyphen-insensitive)
+            code_norm = code.upper().replace('-', '')
+            if any(item['code'].upper().replace('-', '') == code_norm for item in self.rss_items):
                 await query.answer(text=f"ℹ️ {code} 已經在 RSS 清單中。", show_alert=False)
                 return
             
