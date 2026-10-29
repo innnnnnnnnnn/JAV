@@ -2,123 +2,131 @@ import urllib.request
 import urllib.parse
 import json
 import logging
-try:
-    import deepl
-except ImportError:
-    deepl = None
-from config import DEEPL_API_KEY
+import re
 
 logger = logging.getLogger(__name__)
 
 class TextTranslator:
     def __init__(self):
-        self.translator = None
-        if deepl and DEEPL_API_KEY:
-            try:
-                self.translator = deepl.Translator(DEEPL_API_KEY)
-            except Exception as e:
-                logger.error(f"Failed to initialize DeepL translator: {e}")
+        self.google_clients = ['dict-chrome-ex', 'at', 'it']
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
 
-    def _google_translate(self, text, target_lang="zh-TW", source_lang="auto"):
+    def _google_translate(self, text, target_lang="zh-TW", source_lang="ja"):
         """
-        Free fallback translation using Google Translate API endpoint.
+        Free and unlimited Google Translate using Chrome extension and mobile client IDs.
+        These client IDs bypass datacenter 429 IP bans.
         """
-        if not text:
+        if not text or not text.strip():
+            return text
+
+        for client in self.google_clients:
+            try:
+                url = (
+                    "https://translate.googleapis.com/translate_a/single?"
+                    f"client={client}&sl={source_lang}&tl={target_lang}&dt=t&q="
+                    + urllib.parse.quote(text)
+                )
+                req = urllib.request.Request(url, headers=self.headers)
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    if resp.status == 200:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        if data and data[0]:
+                            parts = [p[0] for p in data[0] if p and p[0]]
+                            translated = "".join(parts).strip()
+                            if translated:
+                                return translated
+            except Exception as e:
+                logger.debug(f"Google translate client {client} failed: {e}")
+                continue
+
+        return None
+
+    def _mymemory_translate(self, text, target_lang="zh-TW", source_lang="ja"):
+        """
+        Backup free translator using MyMemory API.
+        """
+        if not text or not text.strip():
             return text
         try:
-            url = (
-                "https://translate.googleapis.com/translate_a/single?client=gtx"
-                f"&sl={source_lang}&tl={target_lang}&dt=t&q=" + urllib.parse.quote(text)
-            )
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            url = f"https://api.mymemory.translated.net/get?q={urllib.parse.quote(text)}&langpair={source_lang}|{target_lang}"
+            req = urllib.request.Request(url, headers=self.headers)
+            with urllib.request.urlopen(req, timeout=6) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                if data and data[0]:
-                    parts = [part[0] for part in data[0] if part and part[0]]
-                    return "".join(parts)
+                res = data.get("responseData", {}).get("translatedText")
+                if res and "MYMEMORY WARNING" not in res:
+                    return res.strip()
         except Exception as e:
-            logger.error(f"Google Translation error: {e}")
-        return text
+            logger.debug(f"MyMemory translation error: {e}")
+        return None
 
     def translate_to_chinese(self, text):
-        if not text:
+        if not text or not text.strip():
             return ""
 
-        if self.translator:
-            try:
-                result = self.translator.translate_text(text, target_lang="ZH-HANT")
-                return result.text
-            except Exception as e:
-                logger.warning(f"DeepL Translation error ({e}), falling back to Google Translate...")
+        # 1. Try Google Translate (dict-chrome-ex / at / it)
+        trans = self._google_translate(text)
+        if trans:
+            return trans
 
-        return self._google_translate(text)
+        # 2. Try MyMemory
+        trans = self._mymemory_translate(text)
+        if trans:
+            return trans
+
+        return text
 
     def translate_video(self, video):
         """
-        Translates title and tags of a video object.
-        Tries DeepL first; if quota exceeded or fails, seamlessly falls back to Google Translate.
+        Translates title and tags of a video object to Traditional Chinese.
         """
-        texts_to_translate = []
-        has_title = bool(video.get('title'))
-        tags = video.get('tags', [])
-
-        if has_title:
-            texts_to_translate.append(video['title'])
-
-        texts_to_translate.extend(tags)
-
-        if not texts_to_translate:
-            video['title_zh'] = ""
-            video['tags_zh'] = []
+        if not video:
             return video
 
-        # 1. Try DeepL
-        translated_success = False
-        if self.translator:
-            try:
-                results = self.translator.translate_text(texts_to_translate, target_lang="ZH-HANT")
-                if not isinstance(results, list):
-                    results = [results]
+        raw_title = video.get('title', '')
+        code = video.get('code', '')
+        tags = video.get('tags', [])
 
-                result_texts = [r.text for r in results]
-                idx = 0
-                if has_title:
-                    video['title_zh'] = result_texts[idx]
-                    video['title'] = video['title_zh']
-                    idx += 1
-                else:
-                    video['title_zh'] = ""
+        # Clean title before translating: remove leading code if present (e.g., "SNOS-413 ")
+        clean_title = raw_title
+        if code:
+            code_pattern = re.escape(code)
+            clean_title = re.sub(rf'^{code_pattern}\s*', '', clean_title, flags=re.I)
+        # Also strip generic prefix like ABC-123
+        clean_title = re.sub(r'^[A-Za-z0-9]+-[0-9]+\s*', '', clean_title, flags=re.I).strip()
 
-                translated_tags = result_texts[idx:]
-                video['tags_zh'] = translated_tags
-                video['tags'] = translated_tags
-                translated_success = True
-            except Exception as e:
-                logger.warning(f"DeepL Translation error ({e}), falling back to Google Translate...")
+        if clean_title:
+            zh_title = self.translate_to_chinese(clean_title)
+            video['title_zh'] = zh_title
+            video['title'] = zh_title
+        else:
+            video['title_zh'] = raw_title
 
-        # 2. Fallback to Google Translate if DeepL failed or not available
-        if not translated_success:
-            if has_title:
-                zh_title = self._google_translate(video.get('title', ''))
-                video['title_zh'] = zh_title
-                video['title'] = zh_title
+        # Translate tags
+        translated_tags = []
+        for tag in tags:
+            # Don't translate pure codes or short English acronyms
+            if re.match(r'^[A-Za-z0-9_-]+$', tag):
+                translated_tags.append(tag)
             else:
-                video['title_zh'] = ""
+                zh_tag = self.translate_to_chinese(tag)
+                translated_tags.append(zh_tag or tag)
 
-            translated_tags = [self._google_translate(t) for t in tags]
-            video['tags_zh'] = translated_tags
-            video['tags'] = translated_tags
+        video['tags_zh'] = translated_tags
+        video['tags'] = translated_tags
 
         return video
 
 
 if __name__ == "__main__":
-    translator = TextTranslator()
-    sample = {
-        "title": "葵いぶきを限界集落に置いてきた。AV女優ならオッパイとマ○コだけで帰ってこい！",
-        "tags": ["巨乳", "単体作品"]
+    t = TextTranslator()
+    test_video = {
+        'code': 'SNOS-413',
+        'title': 'SNOS-413 「先生ともっと一緒にいたいです…」 ウブな図書委員の雫のような美乳に我を失い何度も吐精してしまった担任教師 早坂奏音',
+        'tags': ['パイズリ', '女子校生', '巨乳', '早坂奏音']
     }
-    translated = translator.translate_video(sample)
-    print("Translated sample:")
-    print("Title:", translated.get("title_zh"))
-    print("Tags:", translated.get("tags_zh"))
+    res = t.translate_video(test_video)
+    print("Translated Video:")
+    print("Title:", res['title_zh'])
+    print("Tags:", res['tags_zh'])
