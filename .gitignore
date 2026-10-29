@@ -6,5 +6,7 @@ bot.log
 bot_new.log
 torrents.json
 rss_items.json
+pushed_codes.json
+rss.xml
 scratch/
 *.DS_Store

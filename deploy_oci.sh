@@ -10,8 +10,8 @@ REMOTE_PATH="/home/ubuntu/JAV"
 
 echo "🚀 Deploying JAV Bot to OCI ($OCI_IP)..."
 
-# Create remote directory
-ssh -i $SSH_KEY $OCI_USER@$OCI_IP "mkdir -p $REMOTE_PATH"
+# Create remote directory and ensure volume files exist
+ssh -i $SSH_KEY $OCI_USER@$OCI_IP "mkdir -p $REMOTE_PATH && touch $REMOTE_PATH/torrents.json $REMOTE_PATH/rss_items.json $REMOTE_PATH/pushed_codes.json $REMOTE_PATH/bot.log"
 
 # Copy files (excluding what's in dockerignore)
 rsync -avz --exclude-from='.dockerignore' -e "ssh -i $SSH_KEY" ./ $OCI_USER@$OCI_IP:$REMOTE_PATH/
